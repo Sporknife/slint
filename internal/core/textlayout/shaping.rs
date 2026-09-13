@@ -233,6 +233,12 @@ pub struct ShapeBuffer<Length> {
     pub text_runs: Vec<TextRun>,
 }
 
+impl<Length> Default for ShapeBuffer<Length> {
+    fn default() -> Self {
+        Self { glyphs: Vec::new(), text_runs: Vec::new() }
+    }
+}
+
 impl<Length> ShapeBuffer<Length> {
     pub fn new<Font>(layout: &TextLayout<Font>, text: &str) -> Self
     where

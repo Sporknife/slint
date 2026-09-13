@@ -319,3 +319,14 @@ impl super::GlyphRenderer for VectorFont {
         super::Fixed::from_integer(1)
     }
 }
+
+impl super::FontShapingIdentity for VectorFont {
+    fn append_identity(&self, identity: &mut alloc::vec::Vec<u8>) {
+        identity.extend_from_slice(&self.swash_key.value().to_le_bytes());
+        identity.extend_from_slice(&self.swash_offset.to_le_bytes());
+        identity.extend_from_slice(&self.pixel_size.get().to_le_bytes());
+        for coord in &self.normalized_coords {
+            identity.extend_from_slice(&coord.to_le_bytes());
+        }
+    }
+}

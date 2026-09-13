@@ -230,6 +230,14 @@ where
 
     TextLayout { font, letter_spacing, line_height }
 }
+/// Bytes identifying everything about a font that shaping and line breaking
+/// depend on: the face, its pixel size and, for a variable font, the
+/// normalized variation coordinates. Two fonts with equal identity produce
+/// equal glyph advances, which lets the text layout cache key an entry on
+/// the identity instead of holding a reference to the font.
+pub(crate) trait FontShapingIdentity {
+    fn append_identity(&self, identity: &mut Vec<u8>);
+}
 
 pub fn register_bitmap_font(font_data: &'static BitmapFont) {
     BITMAP_FONTS.with(|fonts| fonts.borrow_mut().push(font_data))

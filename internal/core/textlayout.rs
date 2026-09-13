@@ -53,9 +53,9 @@ mod shaping;
 #[cfg(feature = "shared-parley")]
 /// cbindgen:ignore
 pub mod sharedparley;
-use shaping::ShapeBuffer;
-pub use shaping::{AbstractFont, CheckedAdd, DivCount, FontMetrics, Glyph, TextShaper};
-
+pub use shaping::{
+    AbstractFont, CheckedAdd, DivCount, FontMetrics, Glyph, ShapeBuffer, TextShaper,
+};
 mod linebreaker;
 pub use linebreaker::TextLine;
 
@@ -183,11 +183,66 @@ pub struct TextParagraphLayout<'a, Font: AbstractFont> {
 }
 
 impl<Font: AbstractFont> TextParagraphLayout<'_, Font> {
+    /// The line limit the line breaker runs with: the item's `max-lines`,
+    /// clamped to what fits the height when the text elides with `…`.
+    fn breaking_max_lines(&self) -> Option<usize> {
+        let elide = self.overflow == TextOverflow::Elide;
+        // When eliding, always keep at least the first line: when it is taller than the box,
+        // dropping it would render nothing at all, which is more confusing than a clipped line.
+        // The software renderer already clips glyphs to the Text geometry, so the vertical
+        // overflow is trimmed; horizontal elision still places an ellipsis if it is too
+        // wide. Mirrors the parley path, which always keeps line index 0.
+        let line_height = self.layout.line_height();
+        let max_lines_from_height = elide.then(|| self.max_lines_that_fit(line_height).max(1));
+        [self.max_lines, max_lines_from_height].into_iter().flatten().min()
+    }
+
+    /// Shapes the string and breaks it into lines: the two passes
+    /// [`Self::layout_lines`] runs before drawing. Factored out so a caller
+    /// that caches text layout can store both and feed them back through
+    /// [`Self::layout_broken_lines`] on the next call with the same inputs.
+    pub fn break_lines(
+        &self,
+        shape_buffer: &ShapeBuffer<Font::Length>,
+    ) -> Vec<TextLine<Font::Length>> {
+        let wrap = self.wrap != TextWrap::NoWrap;
+        TextLineBreaker::<Font>::new(
+            self.string,
+            shape_buffer,
+            if wrap { Some(self.max_width) } else { None },
+            self.breaking_max_lines(),
+            self.wrap,
+        )
+        .collect()
+    }
+
     /// Layout the given string in lines, and call the `layout_line` callback with the line to draw at position y.
     /// The signature of the `layout_line` function is: `(glyph_iterator, line_x, line_y, text_line, selection)`.
     /// Returns the baseline y coordinate as Ok, or the break value if `line_callback` returns `core::ops::ControlFlow::Break`.
     pub fn layout_lines<R>(
         &self,
+        line_callback: impl FnMut(
+            &mut dyn Iterator<Item = PositionedGlyph<Font::Length>>,
+            Font::Length,
+            Font::Length,
+            &TextLine<Font::Length>,
+            Option<core::ops::Range<Font::Length>>,
+        ) -> core::ops::ControlFlow<R>,
+        selection: Option<core::ops::Range<usize>>,
+    ) -> Result<Font::Length, R> {
+        let shape_buffer = ShapeBuffer::new(&self.layout, self.string);
+        self.layout_broken_lines(&shape_buffer, None, line_callback, selection)
+    }
+
+    /// Like [`Self::layout_lines`], but serves the glyph runs and lines from
+    /// `shape_buffer` and `pre_broken` instead of shaping and breaking again.
+    /// The `pre_broken` lines must have been produced by [`Self::break_lines`]
+    /// for the same string, font and layout inputs as this layout, so that
+    /// their glyph ranges index into `shape_buffer`.
+    pub fn layout_broken_lines<R>(
+        &self,
+        shape_buffer: &ShapeBuffer<Font::Length>,
+        pre_broken: Option<&[TextLine<Font::Length>]>,
         mut line_callback: impl FnMut(
             &mut dyn Iterator<Item = PositionedGlyph<Font::Length>>,
             Font::Length,
@@ -207,21 +262,18 @@ impl<Font: AbstractFont> TextParagraphLayout<'_, Font> {
         let elide_width = elide_glyph.as_ref().map_or(Font::Length::zero(), |g| g.advance);
         let max_width_without_elision = self.max_width - elide_width;
 
-        let shape_buffer = ShapeBuffer::new(&self.layout, self.string);
-
         // When eliding, always keep at least the first line: when it is taller than the box,
         // dropping it would render nothing at all, which is more confusing than a clipped line.
         // The software renderer already clips glyphs to the Text geometry, so the vertical
         // overflow is trimmed; horizontal elision still places an ellipsis if it is too
         // wide. Mirrors the parley path, which always keeps line index 0.
         let line_height = self.layout.line_height();
-        let max_lines_from_height = elide.then(|| self.max_lines_that_fit(line_height).max(1));
-        let max_lines = [self.max_lines, max_lines_from_height].into_iter().flatten().min();
+        let max_lines = self.breaking_max_lines();
 
         let new_line_break_iter = || {
             TextLineBreaker::<Font>::new(
                 self.string,
-                &shape_buffer,
+                shape_buffer,
                 if wrap { Some(self.max_width) } else { None },
                 max_lines,
                 self.wrap,
@@ -232,6 +284,8 @@ impl<Font: AbstractFont> TextParagraphLayout<'_, Font> {
         let mut text_height = || {
             if self.single_line {
                 line_height
+            } else if let Some(lines) = pre_broken {
+                line_height * (lines.len() as i16).into()
             } else {
                 text_lines = Some(new_line_break_iter().collect::<Vec<_>>());
                 line_height * (text_lines.as_ref().unwrap().len() as i16).into()
@@ -394,20 +448,33 @@ impl<Font: AbstractFont> TextParagraphLayout<'_, Font> {
             core::ops::ControlFlow::Continue(())
         };
 
-        if let Some(lines_vec) = text_lines.take() {
-            for line in lines_vec {
-                if let core::ops::ControlFlow::Break(break_val) =
-                    process_line(&line, &shape_buffer.glyphs)
-                {
-                    return Err(break_val);
+        match pre_broken {
+            Some(lines) => {
+                for line in lines {
+                    if let core::ops::ControlFlow::Break(break_val) =
+                        process_line(line, &shape_buffer.glyphs)
+                    {
+                        return Err(break_val);
+                    }
                 }
             }
-        } else {
-            for line in new_line_break_iter() {
-                if let core::ops::ControlFlow::Break(break_val) =
-                    process_line(&line, &shape_buffer.glyphs)
-                {
-                    return Err(break_val);
+            None => {
+                if let Some(lines_vec) = text_lines.take() {
+                    for line in lines_vec {
+                        if let core::ops::ControlFlow::Break(break_val) =
+                            process_line(&line, &shape_buffer.glyphs)
+                        {
+                            return Err(break_val);
+                        }
+                    }
+                } else {
+                    for line in new_line_break_iter() {
+                        if let core::ops::ControlFlow::Break(break_val) =
+                            process_line(&line, &shape_buffer.glyphs)
+                        {
+                            return Err(break_val);
+                        }
+                    }
                 }
             }
         }
@@ -565,6 +632,90 @@ impl FontMetrics<f32> for FixedTestFont {
 
     fn cap_height(&self) -> f32 {
         4.
+    }
+}
+
+/// Renders every positioned glyph the paragraph layout produces, for tests
+/// that compare a layout run against a run through the line-breaking cache.
+#[cfg(test)]
+fn draw_paragraph_glyphs<Font>(
+    paragraph: &TextParagraphLayout<'_, Font>,
+) -> Vec<Vec<core::num::NonZeroU16>>
+where
+    Font: AbstractFont,
+    Font::Length: core::fmt::Debug,
+{
+    let mut lines = Vec::new();
+    paragraph
+        .layout_lines::<()>(
+            |glyphs, _, _, _, _| {
+                lines.push(glyphs.map(|g| g.glyph_id).collect());
+                core::ops::ControlFlow::Continue(())
+            },
+            None,
+        )
+        .unwrap();
+    lines
+}
+
+#[test]
+fn test_cached_layout_matches_uncached() {
+    // The line-breaking cache serves a redraw with the glyphs and lines of a
+    // previous layout; the output must be identical to re-laying-out. Exercise
+    // the combinations of wrap, alignment, elision and multi-line text that
+    // the software renderer draws through the cache.
+    let font = FixedTestFont;
+    for (text, max_width, wrap, overflow) in [
+        ("Counter: 7", 130., TextWrap::NoWrap, TextOverflow::Clip),
+        ("Hello world from the embedded text layout", 130., TextWrap::WordWrap, TextOverflow::Clip),
+        (
+            "Hello world from the embedded text layout",
+            130.,
+            TextWrap::WordWrap,
+            TextOverflow::Elide,
+        ),
+        ("Hello world", 60., TextWrap::CharWrap, TextOverflow::Clip),
+        ("Hello\n\n\nworld", 130., TextWrap::WordWrap, TextOverflow::Clip),
+    ] {
+        for vertical_alignment in [
+            TextVerticalAlignment::Top,
+            TextVerticalAlignment::Center,
+            TextVerticalAlignment::Bottom,
+        ] {
+            let paragraph = TextParagraphLayout {
+                string: text,
+                layout: TextLayout { font: &font, letter_spacing: None, line_height: None },
+                max_width,
+                max_height: 30.,
+                horizontal_alignment: TextHorizontalAlignment::Left,
+                vertical_alignment,
+                wrap,
+                overflow,
+                single_line: false,
+                max_lines: None,
+            };
+
+            let direct = draw_paragraph_glyphs(&paragraph);
+
+            let shape_buffer = ShapeBuffer::new(&paragraph.layout, paragraph.string);
+            let pre_broken = paragraph.break_lines(&shape_buffer);
+            let mut cached_lines: Vec<Vec<core::num::NonZeroU16>> = Vec::new();
+            paragraph
+                .layout_broken_lines::<()>(
+                    &shape_buffer,
+                    Some(&pre_broken),
+                    |glyphs, _, _, _, _| {
+                        cached_lines.push(
+                            glyphs.map(|positioned_glyph| positioned_glyph.glyph_id).collect(),
+                        );
+                        core::ops::ControlFlow::Continue(())
+                    },
+                    None,
+                )
+                .unwrap();
+
+            assert_eq!(direct, cached_lines, "cache must not change output for {text:?}");
+        }
     }
 }
 

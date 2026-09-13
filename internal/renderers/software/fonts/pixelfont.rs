@@ -158,3 +158,13 @@ impl FontMetrics<PhysicalLength> for PixelFont {
             .cast()
     }
 }
+
+impl super::FontShapingIdentity for PixelFont {
+    fn append_identity(&self, identity: &mut alloc::vec::Vec<u8>) {
+        // The address of the static font table: glyph data, character map,
+        // family and weight all live behind it, so equal addresses mean the
+        // same face with the same advances.
+        identity.extend_from_slice(&(self.bitmap_font as *const BitmapFont as usize).to_le_bytes());
+        identity.extend_from_slice(&self.pixel_size.get().to_le_bytes());
+    }
+}
