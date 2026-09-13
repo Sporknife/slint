@@ -603,6 +603,19 @@ pub trait ItemRenderer {
         _self_rc: &ItemRc,
         _size: LogicalSize,
     );
+    /// For a text item about to be redrawn, returns the region of the item whose rendered
+    /// pixels differ from the previous draw, in the item's local coordinates, or `None` when
+    /// the renderer cannot narrow it down. Partial renderers use this to keep the dirty
+    /// region at sub-element granularity when only part of the text changed; falling back
+    /// to the item's full rect is always correct.
+    fn text_item_changed_region(
+        &mut self,
+        _text: Pin<&dyn RenderText>,
+        _item_rc: &ItemRc,
+        _size: LogicalSize,
+    ) -> Option<LogicalRect> {
+        None
+    }
     #[cfg(feature = "path")]
     fn draw_path(&mut self, path: Pin<&Path>, _self_rc: &ItemRc, _size: LogicalSize);
     fn draw_box_shadow(

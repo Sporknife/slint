@@ -52,7 +52,9 @@ use i_slint_core::lengths::{
 };
 use i_slint_core::partial_renderer::{DirtyRegion, PartialRenderingState};
 use i_slint_core::renderer::RendererSealed;
-use i_slint_core::textlayout::{AbstractFont, FontMetrics, PositionedGlyph, TextParagraphLayout};
+use i_slint_core::textlayout::{
+    AbstractFont, FontMetrics, PositionedGlyph, ShapeBuffer, TextParagraphLayout,
+};
 use i_slint_core::window::{WindowAdapter, WindowInner};
 use i_slint_core::{Brush, Color, ImageInner, StaticTextures};
 #[allow(unused)]
@@ -2654,6 +2656,72 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
             .ok();
     }
 
+    /// Narrows the dirty region of a text item whose text changed: diffing
+    /// the glyphs of the previous draw against a fresh layout bounds the
+    /// repaint to the glyphs that differ. Returns `None` when there is no
+    /// previous layout to diff against, when something besides the text
+    /// changed (a different brush or any layout input — the whole element
+    /// must repaint then), or when the change reflows the line structure.
+    fn text_item_changed_region_impl<Font>(
+        &mut self,
+        text: Pin<&dyn i_slint_core::item_rendering::RenderText>,
+        font: &Font,
+        string: &str,
+        self_rc: &ItemRc,
+        size: LogicalSize,
+    ) -> Option<LogicalRect>
+    where
+        Font: AbstractFont
+            + i_slint_core::textlayout::TextShaper<Length = PhysicalLength>
+            + GlyphRenderer
+            + fonts::FontShapingIdentity,
+    {
+        let raw_color = text.color();
+        let geom = LogicalRect::from(size);
+        let max_size = (geom.size.cast() * self.scale_factor).cast();
+        let (horizontal_alignment, vertical_alignment) = text.alignment();
+
+        let item = item_cache_id(self_rc);
+        let slint_context = self.window.context();
+        let layout =
+            fonts::text_layout_for_font(font, &text.font_request(self_rc), self.scale_factor);
+        let paragraph = TextParagraphLayout {
+            string,
+            layout,
+            max_width: max_size.width_length(),
+            max_height: max_size.height_length(),
+            horizontal_alignment,
+            vertical_alignment,
+            wrap: text.wrap(),
+            overflow: text.overflow(),
+            single_line: false,
+            max_lines: text.line_limit(),
+        };
+        let font_identity = {
+            let mut identity = Vec::new();
+            paragraph.layout.font.append_identity(&mut identity);
+            identity
+        };
+
+        self.builtin_text_layout_cache
+            .text_changed_region(
+                item,
+                &paragraph,
+                &font_identity,
+                raw_color,
+                |old_shape, old_lines, new_shape, new_lines| {
+                    glyph_diff_region(
+                        &paragraph,
+                        (old_shape, old_lines),
+                        (new_shape, new_lines),
+                        slint_context,
+                    )
+                },
+            )
+            // The diff is in physical lengths; report it in logical ones.
+            .map(|rect: PhysicalRect| (rect.cast() / self.scale_factor).cast())
+    }
+
     /// Returns the color, mixed with the current_state's alpha
     fn alpha_color(&self, color: Color) -> Color {
         if self.current_state.alpha < 1.0 {
@@ -2680,6 +2748,173 @@ fn alpha_color(color: Color, alpha: u8) -> Color {
     } else {
         color
     }
+}
+
+/// One line of positioned glyphs, collected from the paragraph layout for
+/// the old-vs-new glyph comparison of the dirty-region diff.
+struct CollectedLine {
+    x: PhysicalLength,
+    y: PhysicalLength,
+    glyphs: Vec<PositionedGlyph<PhysicalLength>>,
+}
+
+/// Collects the positioned glyphs of every line the paragraph produces.
+fn collect_lines<Font>(
+    paragraph: &TextParagraphLayout<'_, Font>,
+    shape_buffer: &ShapeBuffer<PhysicalLength>,
+    lines: &[i_slint_core::textlayout::TextLine<PhysicalLength>],
+) -> Vec<CollectedLine>
+where
+    Font: AbstractFont + i_slint_core::textlayout::TextShaper<Length = PhysicalLength>,
+{
+    let mut lines_out: Vec<CollectedLine> = Vec::new();
+    paragraph
+        .layout_broken_lines::<()>(
+            shape_buffer,
+            Some(lines),
+            |glyphs, line_x, line_y, _, _| {
+                lines_out.push(CollectedLine { x: line_x, y: line_y, glyphs: glyphs.collect() });
+                core::ops::ControlFlow::Continue(())
+            },
+            None,
+        )
+        .ok();
+    lines_out
+}
+
+/// The item-local bounding rect of the glyphs whose position or shape differ
+/// between the previous layout and the fresh one, or `None` when the two
+/// layouts produce a different number of lines (a reflow — the whole element
+/// must repaint) or when nothing differs.
+///
+/// Glyphs are compared per line by their byte offset in the text, pairing
+/// glyphs that produce the same character and flagging glyphs that appear on
+/// only one side. The built-in shaper maps one glyph per character, so equal
+/// byte offsets pair up uniquely. The rect of a changed glyph covers its
+/// raster extent at the old and at the new position. A line whose origin
+/// moved (center/right alignment with a new width) repaints every glyph on
+/// it at both positions.
+fn glyph_diff_region<Font>(
+    paragraph: &TextParagraphLayout<'_, Font>,
+    old: (&ShapeBuffer<PhysicalLength>, &[i_slint_core::textlayout::TextLine<PhysicalLength>]),
+    new: (&ShapeBuffer<PhysicalLength>, &[i_slint_core::textlayout::TextLine<PhysicalLength>]),
+    slint_context: &i_slint_core::SlintContext,
+) -> Option<PhysicalRect>
+where
+    Font: AbstractFont
+        + i_slint_core::textlayout::TextShaper<Length = PhysicalLength>
+        + GlyphRenderer,
+{
+    let old_lines = collect_lines(paragraph, old.0, old.1);
+    let new_lines = collect_lines(paragraph, new.0, new.1);
+    if old_lines.len() != new_lines.len() {
+        return None;
+    }
+
+    let baseline_y = |line_y: PhysicalLength| {
+        line_y + paragraph.layout.half_leading() + paragraph.layout.font.ascent()
+    };
+
+    // Glyph raster extent at a line position; None for blank glyphs.
+    let glyph_rect = |font: &Font,
+                      line_x: PhysicalLength,
+                      line_y: PhysicalLength,
+                      positioned: &PositionedGlyph<PhysicalLength>| {
+        let glyph = font.render_glyph(positioned.glyph_id, slint_context)?;
+        let gl_x = PhysicalLength::new((-glyph.x).truncate() as i16);
+        let gl_y = PhysicalLength::new(glyph.y.truncate() as i16);
+        Some(
+            PhysicalRect::new(
+                PhysicalPoint::from_lengths(
+                    line_x + positioned.x - gl_x,
+                    baseline_y(line_y) - gl_y - glyph.height,
+                ),
+                glyph.size(),
+            )
+            .cast(),
+        )
+    };
+
+    let mut dirty: Option<euclid::Rect<f32, PhysicalPx>> = None;
+    let mut add = |rect: Option<euclid::Rect<f32, PhysicalPx>>| {
+        if let Some(rect) = rect {
+            dirty = Some(match dirty {
+                Some(existing) => existing.union(&rect),
+                None => rect,
+            });
+        }
+    };
+
+    for (old_line, new_line) in old_lines.iter().zip(new_lines.iter()) {
+        if old_line.x != new_line.x || old_line.y != new_line.y {
+            // The whole line moved without reflowing (center/right alignment
+            // with a new width): every glyph on it needs clearing at its old
+            // position and painting at its new one.
+            for old_glyph in &old_line.glyphs {
+                add(glyph_rect(paragraph.layout.font, old_line.x, old_line.y, old_glyph));
+            }
+            for new_glyph in &new_line.glyphs {
+                add(glyph_rect(paragraph.layout.font, new_line.x, new_line.y, new_glyph));
+            }
+            continue;
+        }
+        let mut old_index = 0usize;
+        let mut new_index = 0usize;
+        loop {
+            let old_glyph = old_line.glyphs.get(old_index);
+            let new_glyph = new_line.glyphs.get(new_index);
+            match (old_glyph, new_glyph) {
+                (None, None) => break,
+                (Some(old_glyph), Some(new_glyph))
+                    if old_glyph.text_byte_offset == new_glyph.text_byte_offset =>
+                {
+                    if old_glyph.glyph_id != new_glyph.glyph_id || old_glyph.x != new_glyph.x {
+                        add(glyph_rect(paragraph.layout.font, old_line.x, old_line.y, old_glyph)
+                            .or(glyph_rect(
+                                paragraph.layout.font,
+                                new_line.x,
+                                new_line.y,
+                                new_glyph,
+                            )));
+                        add(glyph_rect(paragraph.layout.font, new_line.x, new_line.y, new_glyph));
+                    }
+                    old_index += 1;
+                    new_index += 1;
+                }
+                (Some(old_glyph), Some(new_glyph))
+                    if old_glyph.text_byte_offset < new_glyph.text_byte_offset =>
+                {
+                    add(glyph_rect(paragraph.layout.font, old_line.x, old_line.y, old_glyph));
+                    old_index += 1;
+                }
+                (Some(_), Some(_)) => {
+                    let new_glyph = new_glyph.unwrap();
+                    add(glyph_rect(paragraph.layout.font, new_line.x, new_line.y, new_glyph));
+                    new_index += 1;
+                }
+                (Some(old_glyph), None) => {
+                    add(glyph_rect(paragraph.layout.font, old_line.x, old_line.y, old_glyph));
+                    old_index += 1;
+                }
+                (None, Some(new_glyph)) => {
+                    add(glyph_rect(paragraph.layout.font, new_line.x, new_line.y, new_glyph));
+                    new_index += 1;
+                }
+            }
+        }
+    }
+
+    // Intersect with the item's geometry: the draw clips glyphs to it, so
+    // nothing outside can be stale.
+    dirty.map(|rect: euclid::Rect<f32, PhysicalPx>| {
+        let item_rect = euclid::rect(
+            0.,
+            0.,
+            paragraph.max_width.get() as f32,
+            paragraph.max_height.get() as f32,
+        );
+        rect.intersection(&item_rect).map_or(PhysicalRect::default(), |rect| rect.cast())
+    })
 }
 
 struct SelectionInfo {
@@ -2922,6 +3157,41 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
                 None,
             );
         });
+    }
+
+    fn text_item_changed_region(
+        &mut self,
+        text: Pin<&dyn i_slint_core::item_rendering::RenderText>,
+        self_rc: &ItemRc,
+        size: LogicalSize,
+    ) -> Option<LogicalRect> {
+        let font_request = text.font_request(self_rc);
+        #[cfg(feature = "systemfonts")]
+        let mut font_ctx = self.window.context().font_context().borrow_mut();
+        let font = fonts::match_font(
+            &font_request,
+            self.scale_factor,
+            #[cfg(feature = "systemfonts")]
+            &mut font_ctx,
+        );
+
+        #[cfg(feature = "systemfonts")]
+        if uses_parley(&font) {
+            return None;
+        }
+
+        let content = text.text();
+        let string = match &content {
+            PlainOrStyledText::Plain(string) => alloc::borrow::Cow::Borrowed(string.as_str()),
+            PlainOrStyledText::Styled(_) => return None,
+        };
+        if string.trim().is_empty() {
+            return None;
+        }
+
+        with_font!(&font, |font| {
+            self.text_item_changed_region_impl(text, font, &string, self_rc, size)
+        })
     }
 
     fn draw_text_input(

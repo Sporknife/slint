@@ -23,7 +23,10 @@ use crate::item_rendering::{
 use crate::item_tree::{ItemTreeRc, ItemTreeWeak, ItemVisitorResult};
 #[cfg(feature = "path")]
 use crate::items::Path;
-use crate::items::{BoxShadow, Clip, ItemRc, ItemRef, Layer, Opacity, RenderingResult, TextInput};
+use crate::items::{
+    BoxShadow, Clip, ComplexText, ItemRc, ItemRef, Layer, Opacity, RenderingResult, SimpleText,
+    TextInput,
+};
 use crate::lengths::{
     ItemTransform, LogicalBorderRadius, LogicalPoint, LogicalPx, LogicalRect, LogicalSize,
     LogicalVector, ScaleFactor,
@@ -421,6 +424,30 @@ fn clipped_screen_rect(
     transformed.cast().intersection(clip_rect)
 }
 
+/// Asks the renderer how much of the text item's pixels changed since its
+/// previous draw, for text items only; other items always repaint as a
+/// whole. Returns `None` when the renderer cannot narrow the region down
+/// (including for renderers that do not implement the narrowing).
+fn text_item_changed_region<T: ItemRenderer + ItemRendererFeatures>(
+    renderer: &mut PartialRenderer<'_, T>,
+    item: Pin<ItemRef>,
+    item_rc: &ItemRc,
+    size: &LogicalRect,
+) -> Option<LogicalRect> {
+    // The `?`-chain clippy suggests cannot express the `as` casts: each arm
+    // coerces a different concrete item to the same trait object.
+    #[allow(clippy::question_mark)]
+    let text: Pin<&dyn crate::item_rendering::RenderText> =
+        if let Some(text) = ItemRef::downcast_pin::<ComplexText>(item) {
+            text as Pin<&dyn crate::item_rendering::RenderText>
+        } else if let Some(text) = ItemRef::downcast_pin::<SimpleText>(item) {
+            text as Pin<&dyn crate::item_rendering::RenderText>
+        } else {
+            return None;
+        };
+    renderer.actual_renderer.text_item_changed_region(text, item_rc, size.size)
+}
+
 /// Put this structure in the renderer to help with partial rendering
 ///
 /// This is constructed from a [`PartialRenderingState`]
@@ -604,13 +631,36 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                             || new_state.transform_to_screen != new_state.old_transform_to_screen;
 
                         if rendering_dirty {
-                            self.dirty_region.add_rect(new_screen_rect);
                             if moved {
+                                self.dirty_region.add_rect(new_screen_rect);
                                 self.mark_dirty_rect(
                                     cached_geom.bounding_rect(),
                                     state.old_transform_to_screen,
                                     &state.clipped,
                                 );
+                            } else if let Some(changed) = text_item_changed_region(
+                                self,
+                                item,
+                                &item_rc,
+                                new_geom.bounding_rect(),
+                            ) {
+                                // The renderer narrowed the repaint to the
+                                // pixels that differ from the previous draw;
+                                // everything else in the item's rect still
+                                // holds the same pixels. The rect is
+                                // item-local: shift it to where the item
+                                // sits, like its bounding rect.
+                                let changed =
+                                    changed.translate(new_geom.bounding_rect().origin.to_vector());
+                                if let Some(changed) = clipped_screen_rect(
+                                    &changed,
+                                    &state.transform_to_screen,
+                                    &state.clipped,
+                                ) {
+                                    self.dirty_region.add_rect(changed);
+                                }
+                            } else {
+                                self.dirty_region.add_rect(new_screen_rect);
                             }
 
                             ItemVisitorResult::Continue(new_state)

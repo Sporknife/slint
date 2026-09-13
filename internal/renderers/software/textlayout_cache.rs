@@ -89,6 +89,24 @@ impl CacheKey {
             single_line: paragraph.single_line,
         }
     }
+
+    /// Whether this key agrees with `other` on everything except the string,
+    /// the precondition for diffing the glyph runs of two layouts against
+    /// each other: the font, the geometry and the options are what position
+    /// and shape the glyphs, and only the text content may differ.
+    fn matches_except_string(&self, other: &Self) -> bool {
+        self.font == other.font
+            && self.letter_spacing == other.letter_spacing
+            && self.line_height == other.line_height
+            && self.max_width == other.max_width
+            && self.max_height == other.max_height
+            && self.horizontal_alignment == other.horizontal_alignment
+            && self.vertical_alignment == other.vertical_alignment
+            && self.wrap == other.wrap
+            && self.overflow == other.overflow
+            && self.max_lines == other.max_lines
+            && self.single_line == other.single_line
+    }
 }
 
 struct CacheEntry {
@@ -168,6 +186,70 @@ impl TextLayoutCache {
         let result = run(&shape_buffer, &lines);
         self.store(item, key, color, shape_buffer, lines);
         result
+    }
+
+    /// Diffs the glyphs of the item's previous layout against a fresh layout
+    /// of the current paragraph, and stores the fresh one.
+    ///
+    /// Returns `None` — the caller keeps the item's full dirty rect — unless
+    /// an entry for `item` exists whose key matches the current one except
+    /// for the string, and whose color matches `color`: then the pixels can
+    /// only differ where the text differs, and the returned rect bounds
+    /// exactly the glyphs whose shape or position changed, in the item's
+    /// local coordinates. When the strings are equal the layout is identical
+    /// and `None` is returned as well: the pixels did not change, but the
+    /// item still needs its (cheap) redraw to re-arm its dependencies.
+    ///
+    /// `diff` receives the previous and the fresh shape buffer and lines and
+    /// produces the item-local bounding rect of the changed pixels.
+    pub(crate) fn text_changed_region<Font>(
+        &self,
+        item: (usize, u32),
+        paragraph: &TextParagraphLayout<'_, Font>,
+        font_identity: &[u8],
+        color: Brush,
+        diff: impl FnOnce(
+            &ShapeBuffer<PhysicalLength>,
+            &[TextLine<PhysicalLength>],
+            &ShapeBuffer<PhysicalLength>,
+            &[TextLine<PhysicalLength>],
+        ) -> Option<super::PhysicalRect>,
+    ) -> Option<super::PhysicalRect>
+    where
+        Font: AbstractFont<Length = PhysicalLength>,
+    {
+        let key = CacheKey::new(font_identity, paragraph);
+        let previous = {
+            let mut slots = self.slots.borrow_mut();
+            let slot = slots
+                .iter_mut()
+                .position(|slot| slot.as_ref().is_some_and(|entry| entry.item == Some(item)))?;
+            let entry = slots[slot].as_mut()?;
+            if entry.color != color {
+                return None;
+            }
+            if entry.key == key {
+                // The layout is unchanged: this dirtiness comes from a
+                // property outside the key (a re-evaluation to the same
+                // value, or a brush change that was missed), which the
+                // caller covers with the full rect.
+                return None;
+            }
+            if !entry.key.matches_except_string(&key) {
+                return None;
+            }
+            // The old buffers leave the slot; the caller puts the fresh
+            // layout back into the very same slot, or the next diff would
+            // find empty buffers and bail out.
+            (core::mem::take(&mut entry.shape_buffer), core::mem::take(&mut entry.lines), slot)
+        };
+        let (old_shape, old_lines, slot) = previous;
+
+        let (shape_buffer, lines) = shape_and_break(paragraph);
+        let region = diff(&old_shape, &old_lines, &shape_buffer, &lines);
+        let mut slots = self.slots.borrow_mut();
+        slots[slot] = Some(CacheEntry { item: Some(item), key, color, shape_buffer, lines });
+        region
     }
 
     fn store(
