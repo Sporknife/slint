@@ -276,6 +276,20 @@ impl TextLayoutCache {
         slots[slot] = Some(CacheEntry { item, key, color, shape_buffer, lines });
     }
 
+    /// Drops the item's entry, if any. The dirty-region hook calls this on
+    /// every path where the draw is going to skip the item (an empty string,
+    /// a parley-routed font, or nothing to draw into): with no previous
+    /// layout left behind, the next change finds no diff base and falls back
+    /// to the full rect instead of diffing against pixels never shown.
+    pub(crate) fn evict_item(&self, item: (usize, u32)) {
+        let mut slots = self.slots.borrow_mut();
+        for slot in slots.iter_mut() {
+            if slot.as_ref().is_some_and(|entry| entry.item == Some(item)) {
+                *slot = None;
+            }
+        }
+    }
+
     /// Drops every entry drawn by items of a destroyed tree, so a later tree
     /// reusing the same address can never match its layouts. `tree` is the
     /// address half of the [`item_cache_id`](super::item_cache_id) identity.

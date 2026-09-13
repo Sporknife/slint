@@ -3165,6 +3165,11 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
         self_rc: &ItemRc,
         size: LogicalSize,
     ) -> Option<LogicalRect> {
+        // The draw this narrows must paint what the diff assumes it paints.
+        // On every path where the draw skips the item, drop its previous
+        // layout instead: with no diff base left behind, the next change
+        // repaints the full rect rather than diffing against pixels that
+        // were never shown.
         let font_request = text.font_request(self_rc);
         #[cfg(feature = "systemfonts")]
         let mut font_ctx = self.window.context().font_context().borrow_mut();
@@ -3177,15 +3182,29 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
 
         #[cfg(feature = "systemfonts")]
         if uses_parley(&font) {
+            // The builtin cache is bypassed on the parley path (and a font
+            // flip-flopping between the paths would otherwise leave a stale
+            // base behind).
+            self.builtin_text_layout_cache.evict_item(item_cache_id(self_rc));
             return None;
         }
 
         let content = text.text();
         let string = match &content {
             PlainOrStyledText::Plain(string) => alloc::borrow::Cow::Borrowed(string.as_str()),
+            // Styled layouts are cached by the draw but never diffed, so
+            // declining needs no eviction.
             PlainOrStyledText::Styled(_) => return None,
         };
         if string.trim().is_empty() {
+            // The draw paints nothing and stores nothing.
+            self.builtin_text_layout_cache.evict_item(item_cache_id(self_rc));
+            return None;
+        }
+        if !self.should_draw(&LogicalRect::from(size)) {
+            // Clipped out, zero-sized, or fully transparent: the draw below
+            // will skip the item.
+            self.builtin_text_layout_cache.evict_item(item_cache_id(self_rc));
             return None;
         }
 
