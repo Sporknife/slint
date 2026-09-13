@@ -1,0 +1,268 @@
+// Copyright © SixtyFPS GmbH <info@slint.dev>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
+
+import "fonts/NotoSansMono-Regular.ttf";
+import "fonts/NotoSansHebrew-Variable.ttf";
+import "fonts/NotoSansArabic-Variable.ttf";
+import "fonts/NotoSansThai-Variable.ttf";
+import "fonts/NotoSansMonoCJK-JP-Subset.ttf";
+
+export component ConcatBench inherits Window {
+    width: 480px;
+    height: 1060px;
+    background: #102030;
+
+    in-out property <int> counter: 7;
+    // Test-only switch that empties the counter text while keeping its
+    // geometry fixed below. An empty frame must not leave a stale layout
+    // behind for the next text change to diff against.
+    in-out property <bool> empty-counter: false;
+    in-out property <color> text-color: #f0a830;
+    in-out property <int> late-counter: 7;
+    in-out property <string> middle-word: "alpha";
+    in-out property <length> paragraph-width: 480px;
+    in-out property <bool> centered: false;
+    in-out property <bool> big-font: false;
+    in-out property <bool> extra-lines: false;
+    in-out property <bool> moved: false;
+    in-out property <int> elide-counter: 7;
+    in-out property <string> hidden-token: "hidden-one";
+    in-out property <[string]> list-rows;
+    in-out property <string> input-text: "PIN 0000";
+    in-out property <string> long-token: "";
+    in-out property <int> styled-counter: 7;
+    // Test-only alignment harness: 0 = left, 1 = center, 2 = right. Drives
+    // the dedicated single-line text below, whose fixed geometry makes every
+    // width-changing update shift the line origin without reflowing.
+    in-out property <int> align-test-mode: 0;
+    in-out property <string> align-test-text: "Value 7";
+    // Test-only layout-input switches for the fallback pins below.
+    in-out property <bool> extra-spacing: false;
+    in-out property <bool> tall-lines: false;
+    in-out property <bool> elide-fuzz: false;
+    in-out property <int> valign-mode: 0;
+    // Test-only script harness: 0 = Hebrew, 1 = Arabic, 2 = Thai, 3 = CJK
+    // mono. The builtin layout has no bidi engine (logical order renders
+    // left to right), so these cases pin narrow==full equivalence per
+    // script, never visual correctness.
+    in-out property <int> script-mode: 0;
+    in-out property <string> script-text: "שלום";
+    // Test-only first word: swapped for same- and different-width words
+    // while the tail never moves in the source string.
+    in-out property <string> lead-word: "alpha";
+    // Test-only fuzz target: the fuzz test drives mode and text together so
+    // most cases narrow within one font; mode 4 is Noto Sans Mono.
+    in-out property <int> fuzz-mode: 4;
+    in-out property <string> fuzz-text: "fuzz";
+    // Glyph coverage manifest: EmbedForSoftwareRenderer only embeds
+    // characters seen in .slint string literals (plus ASCII/●/…), so every
+    // non-ASCII character the Rust tests drive must appear here — otherwise
+    // the test silently exercises tofu (fixed invisible advances) instead of
+    // real glyphs. Emoji stay tofu by design (no embeddable source here).
+    // Enforced by build.rs: the build fails listing any driven character
+    // this literal does not provide.
+    in-out property <string> coverage: "שלום עולם אב רב مرحبا العالم สวัสดี ดี ครับ 日本語 中国語 テスト カタカナ café é";
+
+    Text {
+        // The pattern under measurement: a static prefix concatenated with a
+        // frequently-changing value. One Text element, as a user would write it.
+        // The geometry is fixed so empty-string transitions keep the item rect
+        // stable for the regression test.
+        x: root.moved ? 20px : 10px;
+        y: 10px;
+        width: 460px;
+        height: 50px;
+        wrap: word-wrap;
+        text: root.empty-counter ? "" : "Counter: " + counter;
+        font-size: 36px;
+        color: text-color;
+    }
+
+    // An opaque element partially covering the counter text: the narrowing
+    // repaints under it (harmless), the cover itself stays untouched.
+    Rectangle {
+        x: 150px;
+        y: 10px;
+        width: 80px;
+        height: 50px;
+        background: #224466;
+    }
+
+    // A clipped element whose content is wider than the container: the
+    // narrowed dirty region is intersected with the clip.
+    Rectangle {
+        x: 250px;
+        y: 10px;
+        width: 200px;
+        height: 50px;
+        background: #103050;
+        clip: true;
+        Text {
+            text: "clipped " + counter + " tail";
+            font-size: 18px;
+            color: white;
+        }
+    }
+
+    Text {
+        // The word-wrap case: a long paragraph with the value in the middle,
+        // wrapped across several lines in the window width.
+        y: 60px;
+        width: root.paragraph-width;
+        wrap: word-wrap;
+        text: "Status report line one: value " + counter + " is current. The quick brown fox jumps over the lazy dog while the layout engine re-breaks every line of this paragraph on each redraw.";
+        font-size: root.big-font ? 24px : 18px;
+        horizontal-alignment: root.centered ? center : left;
+        color: white;
+    }
+
+    Text {
+        // The late-word case: a long paragraph whose dynamic token sits in
+        // the last line, so a change must not repaint the lines above it.
+        y: 240px;
+        width: 480px;
+        wrap: word-wrap;
+        text: "Late report trailing tail with filler text that keeps wrapping across several lines and still leaves the final status token near the end of the paragraph: value " + late-counter + (extra-lines ? "\n" : "") + " remains current.";
+        font-size: 18px;
+        color: white;
+    }
+
+    Text {
+        // The monospace case: a same-length swap in the middle changes only
+        // the glyph ids of one word, with identical advances and positions.
+        y: 420px;
+        width: 480px;
+        wrap: word-wrap;
+        text: "Monospace report: the middle token " + middle-word + " swapped in place, and the quick brown fox keeps every other glyph exactly where the layout engine positioned it.";
+        font-family: "Noto Sans Mono";
+        font-size: 16px;
+        color: white;
+    }
+
+    Text {
+        // The elide case: three lines with an ellipsis. The counter token is
+        // visible inside the kept lines; the hidden token sits beyond the
+        // cut, so changing it must not move a pixel.
+        y: 540px;
+        width: 480px;
+        wrap: word-wrap;
+        max-lines: 3;
+        overflow: elide;
+        text: "Elided report line one with the visible value " + elide-counter + " early on, then enough filler to run past the three line limit, ending in the hidden tail: " + hidden-token + " which no redraw should ever need.";
+        font-size: 16px;
+        color: white;
+    }
+
+    Text {
+        // The alignment case: a single fixed-geometry line, so a value
+        // change only ever moves the line origin (center/right) without
+        // re-wrapping. Any missed origin shift leaves stale pixels.
+        y: 604px;
+        width: 480px;
+        height: 32px;
+        wrap: no-wrap;
+        horizontal-alignment: root.align-test-mode == 1 ? center : root.align-test-mode == 2 ? right : left;
+        // Layout-input overrides for the fallback pins: each alters the
+        // cache key, so the hook must decline and repaint the whole line.
+        letter-spacing: root.extra-spacing ? 2px : 0px;
+        line-height-factor: root.tall-lines ? 2.0 : 1.0;
+        vertical-alignment: root.valign-mode == 1 ? center : root.valign-mode == 2 ? bottom : top;
+        text: root.align-test-text;
+        font-size: 16px;
+        color: white;
+    }
+
+    Text {
+        // The unbroken-token case: a long run without break opportunities
+        // exercises the breaker's break-anywhere and truncation paths, and
+        // the diff over a line that extends past the box.
+        y: 640px;
+        width: 480px;
+        wrap: word-wrap;
+        text: "Report: " + long-token + counter + " end.";
+        font-size: 16px;
+        color: white;
+    }
+
+    StyledText {
+        // The styled-text case: markdown with a dynamic interpolation; the
+        // built-in layout path flattens the styling, and the narrowing hook
+        // declines styled paragraphs (full rect repaint).
+        y: 740px;
+        width: 480px;
+        text: @markdown("Styled report with *emphasis* around value \{styled-counter} and static tail text to fill the remaining lines of this paragraph completely.");
+        default-font-size: 16px;
+        default-color: white;
+    }
+
+    // The list case: model-driven repeated texts; a row mutation must
+    // repaint only the row that changed.
+    VerticalLayout {
+        x: 10px;
+        y: 810px;
+        width: 300px;
+        height: 200px;
+        for row in list-rows: Text {
+            text: "Sensor " + row;
+            font-size: 14px;
+            color: #a0c0e0;
+        }
+    }
+
+    Text {
+        // The first-word case: a short monospace line whose leading word is
+        // swapped for same- and different-width words; the static tail only
+        // ever moves on screen, never in the source string.
+        x: 310px;
+        y: 810px;
+        width: 160px;
+        height: 40px;
+        wrap: word-wrap;
+        text: root.lead-word + " ok";
+        font-family: "Noto Sans Mono";
+        font-size: 16px;
+        color: white;
+    }
+
+    Text {
+        // The script case: short strings in Hebrew, Arabic, Thai or CJK mono
+        // (see script-mode). Fixed geometry; width changes only ever move
+        // line origins without re-wrapping.
+        x: 310px;
+        y: 855px;
+        width: 160px;
+        height: 55px;
+        wrap: word-wrap;
+        font-family: root.script-mode == 1 ? "Noto Sans Arabic" : root.script-mode == 2 ? "Noto Sans Thai" : root.script-mode == 3 ? "Noto Sans Mono CJK JP" : "Noto Sans Hebrew";
+        text: root.script-text;
+        font-size: 16px;
+        color: white;
+    }
+
+    Text {
+        // The fuzz target: arbitrary mixed-script strings (see fuzz-mode for
+        // the font). Clipped to its box; nothing drawn outside can go stale.
+        x: 310px;
+        y: 915px;
+        width: 160px;
+        height: 95px;
+        wrap: word-wrap;
+        // Overflow toggle for the fallback pins: single-word literals work
+        // in ternaries (unlike the dashed char-wrap, which the language
+        // cannot express at all — the CharWrap breaker path is covered by
+        // core unit tests instead).
+        overflow: root.elide-fuzz ? elide : clip;
+        font-family: root.fuzz-mode == 0 ? "Noto Sans Hebrew" : root.fuzz-mode == 1 ? "Noto Sans Arabic" : root.fuzz-mode == 2 ? "Noto Sans Thai" : root.fuzz-mode == 3 ? "Noto Sans Mono CJK JP" : "Noto Sans Mono";
+        text: root.fuzz-text;
+        font-size: 16px;
+        color: white;
+    }
+
+    TextInput {
+        y: 1020px;
+        width: 300px;
+        text: root.input-text;
+        font-size: 16px;
+        color: white;
+    }
+}

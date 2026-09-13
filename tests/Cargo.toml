@@ -20,6 +20,7 @@ members = [
   'screenshots',
   'backends',
   'manual/windowattributes',
+  'manual/text-concat-bench',
   'manual/module-builds/blogica',
   'manual/module-builds/blogicb',
   'manual/module-builds/app',
