@@ -1,0 +1,29 @@
+# Copyright © SixtyFPS GmbH <info@slint.dev>
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
+
+[package]
+name = "text-concat-bench"
+description.workspace = true
+authors.workspace = true
+documentation.workspace = true
+edition.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish = false
+
+[[bin]]
+name = "text-concat-bench"
+path = "bench.rs"
+
+[dependencies]
+slint = { workspace = true, features = ["std", "compat-1-2", "libm", "unsafe-single-threaded", "renderer-software"] }
+
+[build-dependencies]
+slint-build = { path = "../../../api/rs/build", features = ["renderer-software"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(slint_debug_property)"] }
