@@ -58,7 +58,18 @@ i-slint-renderer-anyrender = { version = "=1.18.0", path = "../internal/renderer
 # `--all-features` enabled a skia backend (skia was a member), but here skia is
 # only a dependency, so without a backend `skia_windowed` is unset and the
 # renderer fails to compile.
-i-slint-renderer-skia = { version = "=1.18.0", path = "../internal/renderers/skia" }
+i-slint-renderer-skia = {
+    version = "=1.18.0",
+    path = "../internal/renderers/skia",
+    # Enable windowing backends unconditionally: softbuffer 0.4.x (the
+    # newest release) fails to compile when no backend is enabled, and its
+    # `x11`/`wayland` features are otherwise only enabled transitively by
+    # the winit backend, which the screenshot driver does not depend on.
+    # Which display server is in use is a runtime property, so both backends
+    # are built and the session type is picked when connecting; `dlopen`
+    # defers the libraries, so nothing system-level is needed to build.
+    features = ["x11", "wayland"],
+}
 
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 itertools = { version = "0.15" }
