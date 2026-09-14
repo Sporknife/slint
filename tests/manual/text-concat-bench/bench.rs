@@ -1063,6 +1063,40 @@ fn script_text_matches_full_repaint() {
     group(3, "cjk", &["日本語", "日本語 7", "日本語 10", "中国語", "abc 日本語 def", "日本語"]);
 }
 
+/// Width changes under center/right alignment must narrow per script, not
+/// just in Latin: each step shifts the line origin without re-wrapping, and
+/// a missed origin shift leaves stale pixels. Runs on both buffer types.
+#[test]
+fn script_alignment_matches_full_repaint() {
+    let _serialized = serialized_test();
+    let mut swapped = Lockstep::new(RepaintBufferType::SwappedBuffers);
+    let mut reused = Lockstep::new(RepaintBufferType::ReusedBuffer);
+    let groups: [(i32, &str, &[&str]); 4] = [
+        (0, "hebrew", &["שלום", "עולם", "אב", "שלום רב", "שלום"]),
+        (1, "arabic", &["مرحبا", "مرحبا 7", "مرحبا 100", "العالم", "مرحبا"]),
+        (2, "thai", &["สวัสดี", "ดี", "สวัสดีครับ", "สวัสดี"]),
+        (3, "cjk", &["日本語", "日本語 7", "日本語 100", "中国語", "日本語"]),
+    ];
+    for align in [1, 2] {
+        for (mode, name, values) in &groups {
+            let setup = format!("{name} align {align}");
+            swapped.change(&setup, &|ui| {
+                ui.set_script_mode(*mode);
+                ui.set_script_align_mode(align);
+            });
+            reused.change(&setup, &|ui| {
+                ui.set_script_mode(*mode);
+                ui.set_script_align_mode(align);
+            });
+            for value in *values {
+                let step = format!("{name} align {align} {value}");
+                swapped.change(&step, &|ui| ui.set_script_text((*value).into()));
+                reused.change(&step, &|ui| ui.set_script_text((*value).into()));
+            }
+        }
+    }
+}
+
 /// A same-count CJK swap on the monospace CJK face changes only glyph ids
 /// with identical advances and positions: the dirty region must stay
 /// word-sized and sit at the line start, like the Latin mono swap.
@@ -1190,7 +1224,8 @@ const FUZZ_MONO: &[&str] = &[
 
 /// Random mixed-script edits must narrow exactly like hand-written ones: 300
 /// deterministic cases (fixed seed replays identically) of substitutions,
-/// insertions and deletions at fragment boundaries, on both buffer types.
+/// insertions and deletions at fragment boundaries, plus alignment changes
+/// that shift line origins, on both buffer types.
 /// The failure message carries the case, mode and text — not megabytes of
 /// pixels — so a red run is directly reproducible.
 #[test]
@@ -1202,10 +1237,19 @@ fn fuzz_text_matches_full_repaint() {
     let mut rng = FuzzRng(0x12345678);
     let mut fragments: Vec<&str> = vec!["fuzz"];
     let mut mode = 4usize;
-    let mut last = (mode, fragments.concat());
+    let mut align = 0usize;
+    let mut last = (mode, align, fragments.concat());
     for case in 0..300 {
         if rng.below(15) == 0 {
             mode = rng.below(pools.len());
+            if rng.below(3) == 0 {
+                // Width changes shift line origins under center/right, the
+                // same path the script×alignment test pins deterministically.
+                align = rng.below(3);
+            }
+        } else if rng.below(30) == 0 {
+            // Alignment-only change: same text, moved line origins.
+            align = rng.below(3);
         } else {
             for _ in 0..1 + rng.below(3) {
                 let pool = pools[mode];
@@ -1230,14 +1274,15 @@ fn fuzz_text_matches_full_repaint() {
             }
         }
         let text = fragments.concat();
-        if (mode, text.clone()) == last {
+        if (mode, align, text.clone()) == last {
             // Setting identical properties draws nothing; skip the case
             // rather than tripping the drew assertions.
             continue;
         }
-        last = (mode, text.clone());
+        last = (mode, align, text.clone());
         let apply = |ui: &ConcatBench| {
             ui.set_fuzz_mode(mode as i32);
+            ui.set_fuzz_align_mode(align as i32);
             ui.set_fuzz_text(text.clone().into());
         };
         apply(&swapped.ui_narrow);
@@ -1246,7 +1291,7 @@ fn fuzz_text_matches_full_repaint() {
         assert!(swapped.draw_reference(), "fuzz {case}: reference drew nothing");
         assert!(
             swapped.narrow_buffer == swapped.reference_buffer,
-            "fuzz {case} diverged on swapped buffers for mode {mode} text {text:?}"
+            "fuzz {case} diverged on swapped buffers for mode {mode} align {align} text {text:?}"
         );
         apply(&reused.ui_narrow);
         apply(&reused.ui_reference);
@@ -1254,7 +1299,7 @@ fn fuzz_text_matches_full_repaint() {
         assert!(reused.draw_reference(), "fuzz {case}: reference drew nothing");
         assert!(
             reused.narrow_buffer == reused.reference_buffer,
-            "fuzz {case} diverged on reused buffers for mode {mode} text {text:?}"
+            "fuzz {case} diverged on reused buffers for mode {mode} align {align} text {text:?}"
         );
     }
 }
@@ -1404,35 +1449,128 @@ fn narrowed_render_by_line_matches_full_repaint() {
     }
 }
 
-/// A rotated screen must narrow and repaint the same way: 90-degree rotation
-/// maps the logical dirty rects onto the rotated buffer, and the result must
-/// stay byte-identical to a full repaint.
+/// A rotated screen must narrow and repaint the same way, whatever the
+/// rotation and buffer type: rotation maps the logical dirty rects onto the
+/// rotated buffer, and the result must stay byte-identical to a full repaint.
 #[test]
 fn narrowed_matches_full_repaint_rotated() {
     let _serialized = serialized_test();
-    let swapped = MinimalSoftwareWindow::new(
-        slint::platform::software_renderer::RepaintBufferType::SwappedBuffers,
-    );
-    queue_window(swapped.clone());
+    use RenderingRotation::{Rotate180, Rotate270, Rotate90};
+    use RepaintBufferType::{ReusedBuffer, SwappedBuffers};
+    for rotation in [Rotate90, Rotate180, Rotate270] {
+        for buffer_type in [SwappedBuffers, ReusedBuffer] {
+            check_rotated(rotation, buffer_type);
+        }
+    }
+}
+
+#[cfg(test)]
+fn check_rotated(rotation: RenderingRotation, buffer_type: RepaintBufferType) {
+    let narrow = MinimalSoftwareWindow::new(buffer_type);
+    queue_window(narrow.clone());
     let ui_narrow = ConcatBench::new().unwrap();
     let _ = ui_narrow.show();
 
-    let full = MinimalSoftwareWindow::new(
-        slint::platform::software_renderer::RepaintBufferType::NewBuffer,
-    );
-    queue_window(full.clone());
+    let reference = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    queue_window(reference.clone());
     let ui_reference = ConcatBench::new().unwrap();
     let _ = ui_reference.show();
 
-    swapped.set_size(SIZE);
-    full.set_size(SIZE);
+    narrow.set_size(SIZE);
+    reference.set_size(SIZE);
 
-    // Rotated rendering writes transposed: the buffer is per-pixel-row
-    // addressed along the rotated stride.
+    // Rotated rendering writes transposed for 90/270: the buffer is
+    // per-pixel-row addressed along the rotated stride.
+    let stride = match rotation {
+        RenderingRotation::Rotate90 | RenderingRotation::Rotate270 => SIZE.height,
+        _ => SIZE.width,
+    } as usize;
+    let name = |what: &str| format!("{what} {rotation:?} {buffer_type:?}");
     let draw = |window: &MinimalSoftwareWindow, buffer: &mut [Rgb565Pixel]| {
         let mut region = None;
         window.request_redraw();
         window.draw_if_needed(|renderer| {
+            renderer.set_rendering_rotation(rotation);
+            region = Some(renderer.render(buffer, stride));
+        });
+        region
+    };
+
+    let mut narrow_buffer = vec![Rgb565Pixel::default(); (SIZE.width * SIZE.height) as usize];
+    let mut reference_buffer = vec![Rgb565Pixel::default(); (SIZE.width * SIZE.height) as usize];
+
+    // The first rotated frame settles the rotation on the renderer.
+    assert!(draw(&narrow, &mut narrow_buffer).is_some());
+    assert!(draw(&reference, &mut reference_buffer).is_some());
+    assert_eq!(
+        narrow_buffer,
+        reference_buffer,
+        "{}: initial rotated frames differ",
+        name("initial")
+    );
+
+    for counter in [8, 9, 10, 11] {
+        ui_narrow.set_counter(counter);
+        ui_reference.set_counter(counter);
+        assert!(draw(&narrow, &mut narrow_buffer).is_some());
+        assert!(draw(&reference, &mut reference_buffer).is_some());
+        assert_eq!(
+            narrow_buffer, reference_buffer,
+            "{} counter {counter}: rotated narrowed repaint diverged",
+            name("rotated")
+        );
+    }
+}
+
+/// Line-buffered rendering under rotation must match a full repaint too:
+/// the narrowed frame rendered line by line in rotated space stays
+/// byte-identical to a buffered full repaint. (This tripped a line-walker
+/// `debug_assert` before the span-expiry fix below this commit's base.)
+#[test]
+fn narrowed_render_by_line_matches_full_repaint_rotated() {
+    let _serialized = serialized_test();
+    let narrow = MinimalSoftwareWindow::new(RepaintBufferType::SwappedBuffers);
+    queue_window(narrow.clone());
+    let ui_narrow = ConcatBench::new().unwrap();
+    let _ = ui_narrow.show();
+
+    let reference = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    queue_window(reference.clone());
+    let ui_reference = ConcatBench::new().unwrap();
+    let _ = ui_reference.show();
+
+    narrow.set_size(SIZE);
+    reference.set_size(SIZE);
+
+    /// Transposed view over the frame buffer: under Rotate90 each rendered
+    /// line is SIZE.height pixels addressed along the rotated stride.
+    struct RotatedFullBuffer<'a>(&'a mut [Rgb565Pixel]);
+
+    impl LineBufferProvider for RotatedFullBuffer<'_> {
+        type TargetPixel = Rgb565Pixel;
+        fn process_line(
+            &mut self,
+            line: usize,
+            range: core::ops::Range<usize>,
+            render_fn: impl FnOnce(&mut [Self::TargetPixel]),
+        ) {
+            render_fn(&mut self.0[line * SIZE.height as usize..][range]);
+        }
+    }
+
+    let draw_narrow_by_line = |buffer: &mut [Rgb565Pixel]| {
+        let mut region = None;
+        narrow.request_redraw();
+        narrow.draw_if_needed(|renderer| {
+            renderer.set_rendering_rotation(RenderingRotation::Rotate90);
+            region = Some(renderer.render_by_line(RotatedFullBuffer(buffer)));
+        });
+        region
+    };
+    let draw_full = |buffer: &mut [Rgb565Pixel]| {
+        let mut region = None;
+        reference.request_redraw();
+        reference.draw_if_needed(|renderer| {
             renderer.set_rendering_rotation(RenderingRotation::Rotate90);
             region = Some(renderer.render(buffer, SIZE.height as usize));
         });
@@ -1442,19 +1580,65 @@ fn narrowed_matches_full_repaint_rotated() {
     let mut narrow_buffer = vec![Rgb565Pixel::default(); (SIZE.width * SIZE.height) as usize];
     let mut reference_buffer = vec![Rgb565Pixel::default(); (SIZE.width * SIZE.height) as usize];
 
-    // The first rotated frame settles the rotation on the renderer.
-    assert!(draw(&swapped, &mut narrow_buffer).is_some());
-    assert!(draw(&full, &mut reference_buffer).is_some());
-    assert_eq!(narrow_buffer, reference_buffer, "initial rotated frames differ");
+    assert!(draw_narrow_by_line(&mut narrow_buffer).is_some());
+    assert!(draw_full(&mut reference_buffer).is_some());
+    assert_eq!(narrow_buffer, reference_buffer, "initial rotated line-buffered frame differs");
 
-    for counter in [8, 9, 10, 11] {
+    for counter in [8, 9, 10, 11, 99, 100, 101] {
         ui_narrow.set_counter(counter);
         ui_reference.set_counter(counter);
-        assert!(draw(&swapped, &mut narrow_buffer).is_some());
-        assert!(draw(&full, &mut reference_buffer).is_some());
+        assert!(draw_narrow_by_line(&mut narrow_buffer).is_some());
+        assert!(draw_full(&mut reference_buffer).is_some());
         assert_eq!(
             narrow_buffer, reference_buffer,
-            "counter {counter}: rotated narrowed repaint diverged"
+            "counter {counter}: rotated line-buffered narrowed repaint diverged"
+        );
+    }
+}
+
+/// Text under an item transform must narrow like untransformed text: a
+/// non-right-angle rotation sends the narrowed rect through the generic
+/// transformed-rect path, and the repaint must still match a full repaint
+/// exactly.
+#[test]
+fn transformed_text_matches_full_repaint() {
+    let _serialized = serialized_test();
+    let narrow = MinimalSoftwareWindow::new(RepaintBufferType::SwappedBuffers);
+    queue_window(narrow.clone());
+    let ui_narrow = TransformBench::new().unwrap();
+    let _ = ui_narrow.show();
+
+    let reference = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    queue_window(reference.clone());
+    let ui_reference = TransformBench::new().unwrap();
+    let _ = ui_reference.show();
+
+    let size = slint::PhysicalSize { width: 480, height: 200 };
+    narrow.set_size(size);
+    reference.set_size(size);
+
+    let draw = |window: &MinimalSoftwareWindow, buffer: &mut [Rgb565Pixel]| {
+        window.request_redraw();
+        window.draw_if_needed(|renderer| {
+            renderer.render(buffer, size.width as usize);
+        })
+    };
+
+    let mut narrow_buffer = vec![Rgb565Pixel::default(); (size.width * size.height) as usize];
+    let mut reference_buffer = vec![Rgb565Pixel::default(); (size.width * size.height) as usize];
+
+    assert!(draw(&narrow, &mut narrow_buffer));
+    assert!(draw(&reference, &mut reference_buffer));
+    assert_eq!(narrow_buffer, reference_buffer, "initial transformed frames differ");
+
+    for counter in [8, 9, 10, 11, 99, 100, 101] {
+        ui_narrow.set_counter(counter);
+        ui_reference.set_counter(counter);
+        assert!(draw(&narrow, &mut narrow_buffer), "counter {counter}: nothing to draw");
+        assert!(draw(&reference, &mut reference_buffer), "counter {counter}: nothing to draw");
+        assert_eq!(
+            narrow_buffer, reference_buffer,
+            "counter {counter}: transformed narrowed repaint diverged"
         );
     }
 }

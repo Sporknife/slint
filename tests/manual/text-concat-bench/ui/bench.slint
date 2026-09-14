@@ -47,6 +47,9 @@ export component ConcatBench inherits Window {
     // script, never visual correctness.
     in-out property <int> script-mode: 0;
     in-out property <string> script-text: "שלום";
+    // 0 = left, 1 = center, 2 = right. Width changes shift the line origin
+    // exactly like the align-test item, per script.
+    in-out property <int> script-align-mode: 0;
     // Test-only first word: swapped for same- and different-width words
     // while the tail never moves in the source string.
     in-out property <string> lead-word: "alpha";
@@ -54,6 +57,8 @@ export component ConcatBench inherits Window {
     // most cases narrow within one font; mode 4 is Noto Sans Mono.
     in-out property <int> fuzz-mode: 4;
     in-out property <string> fuzz-text: "fuzz";
+    // 0 = left, 1 = center, 2 = right for the fuzz target.
+    in-out property <int> fuzz-align-mode: 0;
     // Glyph coverage manifest: EmbedForSoftwareRenderer only embeds
     // characters seen in .slint string literals (plus ASCII/●/…), so every
     // non-ASCII character the Rust tests drive must appear here — otherwise
@@ -233,6 +238,7 @@ export component ConcatBench inherits Window {
         width: 160px;
         height: 55px;
         wrap: word-wrap;
+        horizontal-alignment: root.script-align-mode == 1 ? center : root.script-align-mode == 2 ? right : left;
         font-family: root.script-mode == 1 ? "Noto Sans Arabic" : root.script-mode == 2 ? "Noto Sans Thai" : root.script-mode == 3 ? "Noto Sans Mono CJK JP" : "Noto Sans Hebrew";
         text: root.script-text;
         font-size: 16px;
@@ -247,6 +253,7 @@ export component ConcatBench inherits Window {
         width: 160px;
         height: 95px;
         wrap: word-wrap;
+        horizontal-alignment: root.fuzz-align-mode == 1 ? center : root.fuzz-align-mode == 2 ? right : left;
         // Overflow toggle for the fallback pins: single-word literals work
         // in ternaries (unlike the dashed char-wrap, which the language
         // cannot express at all — the CharWrap breaker path is covered by
@@ -263,6 +270,31 @@ export component ConcatBench inherits Window {
         width: 300px;
         text: root.input-text;
         font-size: 16px;
+        color: white;
+    }
+}
+
+// Minimal scene for the item-transform test: a counter text under a
+// non-right-angle rotation, which forces the narrowed dirty rect through
+// the generic transformed-rect path instead of the fast translation path.
+// Kept as a separate component so the main scene's geometry (and its
+// tight-region origins) stays exactly as the other tests expect.
+export component TransformBench inherits Window {
+    width: 480px;
+    height: 200px;
+    background: #102030;
+
+    in-out property <int> counter: 7;
+
+    Text {
+        x: 10px;
+        y: 10px;
+        width: 460px;
+        height: 60px;
+        wrap: word-wrap;
+        transform-rotation: 15deg;
+        text: "Turned counter: " + counter;
+        font-size: 24px;
         color: white;
     }
 }
