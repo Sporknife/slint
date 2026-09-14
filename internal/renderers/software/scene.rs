@@ -582,3 +582,65 @@ pub struct ConicGradientCommand {
     pub center_x: f32,
     pub center_y: f32,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use i_slint_core::lengths::{PointLengths as _, SizeLengths as _};
+
+    fn rect_item(x: i16, y: i16, width: i16, height: i16, z: u16) -> SceneItem {
+        SceneItem {
+            pos: PhysicalPoint::from_lengths(PhysicalLength::new(x), PhysicalLength::new(y)),
+            size: PhysicalSize::from_lengths(
+                PhysicalLength::new(width),
+                PhysicalLength::new(height),
+            ),
+            z,
+            command: SceneCommand::Rectangle { color: Default::default() },
+        }
+    }
+
+    fn region_with(boxes: &[(i16, i16, i16, i16)]) -> PhysicalRegion {
+        let mut region = PhysicalRegion::default();
+        for (i, &(x, y, width, height)) in boxes.iter().enumerate() {
+            region.rectangles[i] = euclid::Box2D::from_origin_and_size(
+                euclid::point2(x, y),
+                euclid::size2(width, height),
+            );
+        }
+        region.count = boxes.len();
+        region
+    }
+
+    /// Every span listed as current must overlap the line being rendered.
+    /// Regression test: a span ending exactly where the walk resumes after a
+    /// dirty-region hole (here a 9px span over lines 233..242 with the next
+    /// dirty box starting at line 242) was kept in the current list, tripping
+    /// the renderer's `current_line < span bottom` invariant. Seen as a
+    /// `debug_assert` failure rendering line-by-line on a rotated screen,
+    /// where small dirty regions are the norm.
+    #[test]
+    fn line_walker_drops_spans_ending_at_jump_target() {
+        let items = alloc::vec![
+            rect_item(0, 0, 1060, 100, 0),
+            rect_item(503, 233, 9, 9, 1),
+            rect_item(0, 242, 1060, 10, 0),
+        ];
+        let region = region_with(&[(0, 0, 1060, 100), (0, 242, 1060, 10)]);
+        let mut scene = Scene::new(items, SceneVectors::default(), region);
+        // Mirror render_window_frame_by_line's walk bound.
+        while scene.current_line.get() < 252 {
+            for span in scene.items[..scene.current_items_index].iter() {
+                assert!(
+                    scene.current_line >= span.pos.y_length()
+                        && scene.current_line < span.pos.y_length() + span.size.height_length(),
+                    "line {:?} lists non-overlapping span at {:?} size {:?}",
+                    scene.current_line,
+                    span.pos,
+                    span.size,
+                );
+            }
+            scene.next_line();
+        }
+    }
+}
