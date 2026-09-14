@@ -79,6 +79,18 @@ impl Scene {
 
         let skipped = self.current_line >= self.range_valid_until_line && self.recompute_ranges();
 
+        // Drop future items that ended at or before the current line. After a
+        // jump over a dirty-region hole (or for zero-height spans) such items
+        // can never overlap any coming line; pulling one would list a
+        // non-overlapping span as current, and leaving one would block the
+        // items behind it.
+        while self.items.get(self.future_items_index).is_some_and(|item| {
+            item.pos.y_length() <= self.current_line
+                && item.pos.y_length() + item.size.height_length() <= self.current_line
+        }) {
+            self.future_items_index += 1;
+        }
+
         // The items array is split in part:
         // 1. [0..i] are the items that have already been processed, that are on this line
         // 2. [j..current_items_index] are the items from the previous line that might still be
@@ -110,7 +122,9 @@ impl Scene {
                     break;
                 }
                 self.future_items_index += 1;
-                if item.pos.y_length() + item.size.height_length() < self.current_line {
+                // A span ending exactly at the current line covers none of it
+                // (lines are y..y+height); it must not join the current list.
+                if item.pos.y_length() + item.size.height_length() <= self.current_line {
                     continue;
                 }
                 self.items[i] = item;
