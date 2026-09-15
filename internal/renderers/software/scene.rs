@@ -73,6 +73,15 @@ impl Scene {
         r
     }
 
+    fn drop_expired_future_heads(&mut self) {
+        while self.items.get(self.future_items_index).is_some_and(|item| {
+            item.pos.y_length() <= self.current_line
+                && item.pos.y_length() + item.size.height_length() <= self.current_line
+        }) {
+            self.future_items_index += 1;
+        }
+    }
+
     /// Updates `current_items_index` and `future_items_index` to match the invariant
     pub fn next_line(&mut self) {
         self.current_line += PhysicalLength::new(1);
@@ -84,12 +93,7 @@ impl Scene {
         // can never overlap any coming line; pulling one would list a
         // non-overlapping span as current, and leaving one would block the
         // items behind it.
-        while self.items.get(self.future_items_index).is_some_and(|item| {
-            item.pos.y_length() <= self.current_line
-                && item.pos.y_length() + item.size.height_length() <= self.current_line
-        }) {
-            self.future_items_index += 1;
-        }
+        self.drop_expired_future_heads();
 
         // The items array is split in part:
         // 1. [0..i] are the items that have already been processed, that are on this line
@@ -136,6 +140,7 @@ impl Scene {
         }
 
         'outer: loop {
+            self.drop_expired_future_heads();
             let future_next_z = self
                 .items
                 .get(self.future_items_index)
@@ -208,6 +213,9 @@ impl Scene {
                         break;
                     }
                     self.future_items_index += 1;
+                    if item.pos.y_length() + item.size.height_length() <= self.current_line {
+                        continue;
+                    }
                     self.items[i] = item;
                     i += 1;
                 }
