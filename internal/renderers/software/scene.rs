@@ -586,7 +586,6 @@ pub struct ConicGradientCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use i_slint_core::lengths::{PointLengths as _, SizeLengths as _};
 
     fn rect_item(x: i16, y: i16, width: i16, height: i16, z: u16) -> SceneItem {
         SceneItem {
@@ -638,6 +637,38 @@ mod tests {
                     scene.current_line,
                     span.pos,
                     span.size,
+                );
+            }
+            scene.next_line();
+        }
+    }
+
+    #[test]
+    fn line_walker_skips_expired_zero_height_span_behind_valid_span() {
+        let items = alloc::vec![
+            rect_item(0, 105, 100, 20, 2),
+            rect_item(50, 105, 10, 0, 1),
+            rect_item(70, 105, 10, 20, 0),
+        ];
+        let region = region_with(&[(0, 100, 100, 10)]);
+        let mut scene = Scene::new(items, SceneVectors::default(), region);
+        while scene.current_line.get() < 110 {
+            for span in scene.items[..scene.current_items_index].iter() {
+                assert!(
+                    scene.current_line >= span.pos.y_length()
+                        && scene.current_line < span.pos.y_length() + span.size.height_length(),
+                    "line {:?} lists non-overlapping span at {:?} size {:?}",
+                    scene.current_line,
+                    span.pos,
+                    span.size,
+                );
+            }
+            if scene.current_line.get() == 105 {
+                assert!(
+                    scene.items[..scene.current_items_index]
+                        .iter()
+                        .any(|span| span.pos.x == 70 && span.size.height == 20),
+                    "the valid span behind the expired zero-height one must be listed on line 105",
                 );
             }
             scene.next_line();
